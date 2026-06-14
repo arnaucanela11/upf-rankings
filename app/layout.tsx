@@ -43,8 +43,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${apercu.className} h-full antialiased`}>
-      <Analytics />
       <body className="min-h-full bg-white min-w-full h-full w-full">
+        <Analytics />
         {children}
       </body>
     </html>
