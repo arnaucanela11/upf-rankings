@@ -2292,8 +2292,7 @@ function RankingTable({
             Ranking Table
           </h3>
           <p className="text-sm text-slate-500">
-            Look at the ranking results for the selected scenario and view. You
-            can edit the metric values to simulate different outcomes.
+            Look at the ranking results for the selected scenario and view.
           </p>
         </div>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
