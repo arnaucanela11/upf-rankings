@@ -1210,15 +1210,16 @@ export default function RankingsPage() {
 
       <div className="bg-white rounded-lg border border-slate-200 p-6 shadow-sm h-full">
         {activeTab === "overview" && (
-          <RankingTable
-            rows={effectiveRows}
-            loading={contentLoading}
-            provider={selectedScenario?.provider}
-            formula={formula}
-            onMetricChange={handleMetricDraftChange}
-            onRemoveUniversities={handleRemoveUniversitiesFromRanking}
-            lastEditedUniversityId={lastEditedUniversityId}
-          />
+         <RankingTable
+  rows={effectiveRows}
+  loading={contentLoading}
+  provider={selectedScenario?.provider}
+  scenario={selectedScenario}
+  formula={formula}
+  onMetricChange={handleMetricDraftChange}
+  onRemoveUniversities={handleRemoveUniversitiesFromRanking}
+  lastEditedUniversityId={lastEditedUniversityId}
+/>
         )}
 
         {activeTab === "views" && (
@@ -1996,6 +1997,7 @@ function RankingTable({
   rows,
   loading,
   provider,
+  scenario,
   formula,
   onMetricChange,
   onRemoveUniversities,
@@ -2004,6 +2006,7 @@ function RankingTable({
   rows: RankingRow[];
   loading: boolean;
   provider?: string;
+  scenario?: RankingScenario;
   formula: RankingFormula | null;
   onMetricChange: (params: {
     row: RankingRow;
@@ -2011,7 +2014,7 @@ function RankingTable({
     value: number;
   }) => void;
   onRemoveUniversities: (universityIds: string[]) => void;
-  lastEditedUniversityId: string | null;
+  lastEditedUniversityId?: string | null;
 }) {
   const [selectedRows, setSelectedRows] = useState<string[]>([]);
   const [page, setPage] = useState(1);
@@ -2023,6 +2026,12 @@ function RankingTable({
   const [universitySearch, setUniversitySearch] = useState("");
 
   const metricColumns = getMetricColumns(provider);
+
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportFileName, setExportFileName] = useState("ranking-export");
+  const [exportMode, setExportMode] = useState<"all" | "top">("all");
+  const [exportLimit, setExportLimit] = useState("100");
+  const [exportError, setExportError] = useState("");
 
   const goToUpf = () => {
     const allVisibleRows = rows;
@@ -2171,6 +2180,98 @@ function RankingTable({
     setPage(1);
   }, [rows]);
 
+  const handleExportRanking = () => {
+  setExportError("");
+
+  const cleanFileName = exportFileName.trim();
+
+  if (!cleanFileName) {
+    setExportError("Please enter a file name.");
+    return;
+  }
+
+  let rowsToExport = [...sortedRows].sort((a, b) => {
+    const rankA = typeof a.outputRank === "number" ? a.outputRank : Infinity;
+    const rankB = typeof b.outputRank === "number" ? b.outputRank : Infinity;
+
+    return rankA - rankB;
+  });
+
+  if (exportMode === "top") {
+    const limit = Number(exportLimit);
+
+    if (!Number.isFinite(limit) || limit <= 0) {
+      setExportError("Please enter a valid number of universities.");
+      return;
+    }
+
+    rowsToExport = rowsToExport.slice(0, limit);
+  }
+
+  const metricColumns = getMetricColumns(provider);
+
+  const headers = [
+    "Position",
+    "University",
+    "Country",
+    "Provider",
+    "Year",
+    "Model",
+    "Formula",
+    "Output Score",
+    "Original Score",
+    ...metricColumns.map((metric) => metric.label),
+  ];
+
+  const csvRows = rowsToExport.map((row) => {
+    return [
+      row.outputRank ?? "",
+      row.universityName ?? "",
+      row.country ?? "",
+      scenario?.provider ?? provider ?? "",
+      scenario?.year ?? "",
+      scenario?.modelName ?? "",
+      scenario?.formulaName ?? "",
+      typeof row.score === "number" ? row.score.toFixed(2) : "",
+      typeof row.originalScore === "number" ? row.originalScore.toFixed(2) : "",
+      ...metricColumns.map((metric) => {
+        const value = getRowValue(row, metric.key);
+        return typeof value === "number" ? value.toFixed(2) : "";
+      }),
+    ];
+  });
+
+  const csvContent = [headers, ...csvRows]
+    .map((row) =>
+      row
+        .map((cell) => {
+          const value = String(cell).replaceAll('"', '""');
+          return `"${value}"`;
+        })
+        .join(","),
+    )
+    .join("\n");
+
+  const blob = new Blob([csvContent], {
+    type: "text/csv;charset=utf-8;",
+  });
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  const finalFileName = cleanFileName.endsWith(".csv")
+    ? cleanFileName
+    : `${cleanFileName}.csv`;
+
+  link.href = url;
+  link.download = finalFileName;
+  link.click();
+
+  URL.revokeObjectURL(url);
+
+  setExportDialogOpen(false);
+};
+
   useEffect(() => {
     setPage(1);
   }, [pageSize, rows]);
@@ -2214,6 +2315,22 @@ function RankingTable({
           >
             Go to UPF
           </Button>
+          <Button
+  type="button"
+  variant="outline"
+  onClick={() => {
+    setExportError("");
+    setExportFileName(
+      scenario
+        ? `${scenario.provider?.toLowerCase()}-${scenario.year}-ranking`
+        : "ranking-export",
+    );
+    setExportDialogOpen(true);
+  }}
+  className="bg-white cursor-pointer h-10"
+>
+  Export ranking
+</Button>
         </div>
       </div>
 
@@ -2505,6 +2622,145 @@ function RankingTable({
           </Button>
         </div>
       )}
+
+      <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
+  <DialogContent className="bg-white text-zinc-700 sm:max-w-lg">
+    <DialogHeader>
+      <DialogTitle>Export ranking</DialogTitle>
+      <DialogDescription>
+        Download the current ranking as a CSV file.
+      </DialogDescription>
+    </DialogHeader>
+
+    <div className="space-y-5">
+      {exportError && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {exportError}
+        </div>
+      )}
+
+      <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+        <p className="font-medium text-slate-900 mb-2">Ranking details</p>
+
+        <div className="grid grid-cols-2 gap-2 text-slate-600">
+          <p>
+            <span className="font-medium text-slate-800">Provider:</span>{" "}
+            {scenario?.provider || provider || "-"}
+          </p>
+
+          <p>
+            <span className="font-medium text-slate-800">Year:</span>{" "}
+            {scenario?.year || "-"}
+          </p>
+
+          <p className="col-span-2">
+            <span className="font-medium text-slate-800">Model:</span>{" "}
+            {scenario?.modelName || "-"}
+          </p>
+
+          <p className="col-span-2">
+            <span className="font-medium text-slate-800">Formula:</span>{" "}
+            {scenario?.formulaName || "-"}
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <label className="text-sm font-medium text-slate-700">
+          File name
+        </label>
+
+        <Input
+          value={exportFileName}
+          onChange={(e) => setExportFileName(e.target.value)}
+          placeholder="Example: qs-2026-ranking"
+        />
+
+        <p className="text-xs text-slate-500">
+          The file will be downloaded as a CSV.
+        </p>
+      </div>
+
+      <div className="space-y-3">
+        <label className="text-sm font-medium text-slate-700">
+          Universities to export
+        </label>
+
+        <div className="grid gap-2">
+          <button
+            type="button"
+            onClick={() => setExportMode("all")}
+            className={`rounded-lg border px-4 py-3 text-left transition-colors ${
+              exportMode === "all"
+                ? "border-[#D7142A] bg-red-50"
+                : "border-slate-200 hover:bg-slate-50"
+            }`}
+          >
+            <p className="font-medium text-slate-900">
+              Export all universities
+            </p>
+            <p className="text-sm text-slate-500">
+              Export all {sortedRows.length} universities in the current ranking.
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setExportMode("top")}
+            className={`rounded-lg border px-4 py-3 text-left transition-colors ${
+              exportMode === "top"
+                ? "border-[#D7142A] bg-red-50"
+                : "border-slate-200 hover:bg-slate-50"
+            }`}
+          >
+            <p className="font-medium text-slate-900">
+              Export top universities only
+            </p>
+            <p className="text-sm text-slate-500">
+              Export only the first N universities.
+            </p>
+          </button>
+        </div>
+
+        {exportMode === "top" && (
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-slate-700">
+              Number of universities
+            </label>
+
+            <Input
+              type="number"
+              min={1}
+              max={sortedRows.length}
+              value={exportLimit}
+              onChange={(e) => setExportLimit(e.target.value)}
+              placeholder="100"
+            />
+          </div>
+        )}
+      </div>
+    </div>
+
+    <DialogFooter>
+      <Button
+        type="button"
+        variant="outline"
+        onClick={() => setExportDialogOpen(false)}
+        className="bg-white cursor-pointer"
+      >
+        Cancel
+      </Button>
+
+      <Button
+        type="button"
+        onClick={handleExportRanking}
+        className="bg-[#D7142A] hover:bg-[#c11224] text-white cursor-pointer"
+      >
+        Download CSV
+      </Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog>
     </div>
   );
 }
@@ -2690,7 +2946,7 @@ function ViewsPanel({
                         variant="outline"
                         size="sm"
                         onClick={() => onDeleteView(row.id)}
-                        className="text-red-600 hover:text-red-700 bg-white cursor-pointer"
+                        className="text-red-600 hover:text-red-700 bg-white cursor-pointer border-red"
                       >
                         Delete
                       </Button>
@@ -3713,7 +3969,6 @@ function ModelsPanel({
 
                   <TableCell className="text-right">
                     <div className="flex justify-end gap-2">
-
                       {isDefaultModel ? (
                         <Button
                           type="button"
