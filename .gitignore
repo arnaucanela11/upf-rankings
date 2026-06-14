@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/scripts/serviceAccountKey.json
+serviceAccountKey.json
+
+/data/rankings/~$qs-2026.xlsx
