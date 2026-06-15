@@ -1,0 +1,1084 @@
+---
+title: "Idea 7"
+author: "Arnau Canela"
+format: html
+editor: visual
+---
+
+## TFG: Proxy variables and models
+
+### Data setup & cleaning
+
+```{r}
+
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(naniar)
+library(gt)
+library(patchwork)
+library(corrplot)
+library(MASS)
+library(broom)
+library(rsample)
+library(yardstick)
+library(mgcv)
+library(purrr)
+library(caret)
+library(ranger)
+library(doParallel)
+library(nnet)
+set.seed(123)
+
+raw_data <- read_delim(
+  "THE-subpilars-data.csv",
+  delim = ";",
+  col_types = cols(.default = col_character()),
+  show_col_types = FALSE,
+  trim_ws = TRUE
+)
+
+df <- raw_data %>%
+  clean_names() %>%
+  mutate(across(everything(), ~ na_if(str_trim(.x), "")))
+
+glimpse(df)
+dim(df)
+names(df)
+
+to_numeric_clean <- function(x) {
+  x %>%
+    str_replace_all(",", ".") %>%
+    as.numeric()
+}
+
+df <- df %>%
+  mutate(
+    world_ranking_the = as.integer(world_ranking_the),
+    
+    across(
+      c(
+        total_students_enrolled,
+        student_to_staff_ratio,
+        estimated_staff,
+        international_students_fraction,
+        total_international_students,
+        female_students_fraction,
+        total_citations,
+        citations_per_faculty,
+        total_publications,
+        h_index,
+        x2_year_mean_citations_per_publication,
+        x5_year_publication_growth_percent,
+        x5_year_citation_growth_percent,
+        research_productivity,
+        international_co_authorship,
+        alumni_impact_index_0_1000
+      ),
+      to_numeric_clean
+    ),
+    
+    carbon_neutrality_net_zero_target_0_1 =
+      as.integer(to_numeric_clean(carbon_neutrality_net_zero_target_0_1))
+  )
+
+missing_summary <- df %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "missing_count"
+  ) %>%
+  mutate(
+    missing_pct = round(missing_count / nrow(df) * 100, 2)
+  ) %>%
+  arrange(desc(missing_count))
+
+missing_summary %>%
+  filter(missing_count > 0) %>%
+  gt()
+
+df_analysis <- df
+
+df_analysis <- df_analysis %>%
+  mutate(
+    carbon_neutrality_net_zero_target_0_1 = factor(
+      carbon_neutrality_net_zero_target_0_1,
+      levels = c(0, 1),
+      labels = c("No target", "Net-zero target"),
+      ordered = TRUE
+    )
+  )
+
+df_analysis_clean <- df_analysis %>%
+  drop_na()
+
+dim(df_analysis)
+dim(df_analysis_clean)
+
+df_analysis_clean %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "missing_count"
+  ) %>%
+  arrange(desc(missing_count))
+
+df_analysis_clean <- df_analysis_clean %>%
+  mutate(
+    carbon_neutrality_net_zero_target_0_1 = factor(
+      carbon_neutrality_net_zero_target_0_1,
+      levels = c("No target", "Net-zero target"),
+      ordered = TRUE
+    )
+  )
+```
+
+### General Distribution Analysis
+
+```{r}
+
+num_vars <- df_analysis_clean %>%
+  dplyr::select(where(is.numeric)) %>%
+  names()
+
+cat_vars <- df_analysis_clean %>%
+  dplyr::select(where(is.factor)) %>%
+  names()
+
+num_vars
+cat_vars
+
+var_labels <- c(
+  total_students_enrolled = "Total students enrolled",
+  student_to_staff_ratio = "Student-to-staff ratio",
+  estimated_staff = "Estimated staff",
+  international_students_fraction = "International students fraction",
+  total_international_students = "Total international students",
+  female_students_fraction = "Female students fraction",
+  total_citations = "Total citations",
+  citations_per_faculty = "Citations per faculty",
+  total_publications = "Total publications",
+  h_index = "H-index",
+  x2_year_mean_citations_per_publication = "2-year mean citations per publication",
+  x5_year_publication_growth_percent = "5-year publication growth (%)",
+  x5_year_citation_growth_percent = "5-year citation growth (%)",
+  research_productivity = "Research productivity",
+  international_co_authorship = "International co-authorship",
+  alumni_impact_index_0_1000 = "Alumni impact index",
+  carbon_neutrality_net_zero_target_0_1 = "Carbon neutrality / Net-zero target"
+)
+
+get_var_label <- function(var) {
+  if (var %in% names(var_labels)) var_labels[[var]] else var
+}
+```
+
+### Numerical Variables
+
+```{r}
+
+plot_num_var <- function(data, var, bins = 30) {
+  var_label <- get_var_label(var)
+  
+  p1 <- ggplot(data, aes(x = .data[[var]])) +
+    geom_histogram(bins = bins, fill = "#0072B2", color = "white", na.rm = TRUE) +
+    labs(
+      title = paste("Distribution of", var_label),
+      x = var_label,
+      y = "Count"
+    ) +
+    theme_minimal()
+  
+  p2 <- ggplot(data, aes(y = .data[[var]])) +
+    geom_boxplot(fill = "#0072B2", alpha = 0.7, na.rm = TRUE) +
+    labs(
+      title = paste("Boxplot of", var_label),
+      x = NULL,
+      y = var_label
+    ) +
+    theme_minimal()
+  
+  list(
+    histogram = p1,
+    boxplot = p2,
+    combined = p1 / p2
+  )
+}
+```
+
+### Ordinary / Binary variables
+
+```{r}
+
+plot_cat_var <- function(data, var) {
+  var_label <- get_var_label(var)
+  
+  ggplot(data, aes(x = .data[[var]])) +
+    geom_bar(fill = "#0072B2") +
+    labs(
+      title = paste("Distribution of", var_label),
+      x = var_label,
+      y = "Count"
+    ) +
+    theme_minimal()
+}
+```
+
+```{r}
+
+num_plot_list <- set_names(
+  map(num_vars, ~ plot_num_var(df_analysis_clean, .x)),
+  num_vars
+)
+
+cat_plot_list <- set_names(
+  map(cat_vars, ~ plot_cat_var(df_analysis_clean, .x)),
+  cat_vars
+)
+
+walk(num_plot_list, ~ print(.x$combined))
+
+walk(cat_plot_list, print)
+```
+
+### Outliers analysis:
+
+```{r}
+
+detect_outliers_iqr <- function(x, multiplier = 3) {
+  q1 <- quantile(x, 0.25, na.rm = TRUE)
+  q3 <- quantile(x, 0.75, na.rm = TRUE)
+  iqr <- q3 - q1
+  
+  lower <- q1 - multiplier * 3 * iqr
+  upper <- q3 + multiplier * 3 * iqr
+  
+  x < lower | x > upper
+}
+
+outlier_summary <- map_dfr(
+  num_vars,
+  \(v) {
+    outliers <- detect_outliers_iqr(df_analysis_clean[[v]], multiplier = 3)
+    
+    tibble(
+      variable = v,
+      variable_label = get_var_label(v),
+      outlier_count = sum(outliers, na.rm = TRUE),
+      outlier_pct = round(outlier_count / nrow(df_analysis_clean) * 100, 2),
+      min = min(df_analysis_clean[[v]], na.rm = TRUE),
+      q1 = quantile(df_analysis_clean[[v]], 0.25, na.rm = TRUE),
+      median = median(df_analysis_clean[[v]], na.rm = TRUE),
+      q3 = quantile(df_analysis_clean[[v]], 0.75, na.rm = TRUE),
+      max = max(df_analysis_clean[[v]], na.rm = TRUE)
+    )
+  }
+) %>%
+  arrange(desc(outlier_count))
+
+outlier_summary %>%
+  gt()
+
+df_clean_with_ids <- df_analysis_clean %>%
+  mutate(
+    carbon_neutrality_net_zero_target_0_1 = factor(
+      carbon_neutrality_net_zero_target_0_1,
+      levels = c(0, 1),
+      labels = c("No target", "Net-zero target"),
+      ordered = TRUE
+    )
+  )
+
+outlier_vars <- c(
+  "student_to_staff_ratio",
+  "x5_year_publication_growth_percent",
+  "x5_year_citation_growth_percent",
+  "x2_year_mean_citations_per_publication",
+  "international_co_authorship"
+)
+
+outlier_flags <- df_analysis_clean %>%
+  mutate(
+    across(
+      all_of(outlier_vars),
+      ~ detect_outliers_iqr(.x, multiplier = 3),
+      .names = "outlier_{.col}"
+    )
+  ) %>%
+  dplyr::select(starts_with("outlier_")) %>%
+  mutate(
+    n_outlier_flags = rowSums(across(everything()), na.rm = TRUE)
+  )
+
+df_outlier_inspection <- df_clean_with_ids %>%
+  bind_cols(outlier_flags) %>%
+  filter(n_outlier_flags > 0) %>%
+  dplyr::select(
+    all_of(outlier_vars),
+    starts_with("outlier_"),
+    n_outlier_flags
+  ) %>%
+  arrange(desc(n_outlier_flags))
+
+View(df_outlier_inspection)
+
+rows_to_remove <- outlier_flags %>%
+  mutate(row_id = row_number()) %>%
+  filter(n_outlier_flags > 0) %>%
+  pull(row_id)
+
+df_analysis_no_outliers <- df_analysis_clean %>%
+  mutate(row_id = row_number()) %>%
+  filter(!row_id %in% rows_to_remove) %>%
+  dplyr::select(-row_id)
+
+df_clean_no_outliers <- df_clean_with_ids %>%
+  mutate(row_id = row_number()) %>%
+  filter(!row_id %in% rows_to_remove) %>%
+  dplyr::select(-row_id)
+
+df_model <- df_analysis_no_outliers
+
+num_vars_model <- df_model %>%
+  dplyr::select(where(is.numeric)) %>%
+  names()
+
+cat_vars_model <- df_model %>%
+  dplyr::select(where(is.factor)) %>%
+  names()
+
+num_plot_list_no_outliers <- set_names(
+  map(num_vars_model, ~ plot_num_var(df_model, .x)),
+  num_vars_model
+)
+
+cat_plot_list_no_outliers <- set_names(
+  map(cat_vars_model, ~ plot_cat_var(df_model, .x)),
+  cat_vars_model
+)
+
+walk(num_plot_list_no_outliers, ~ print(.x$combined))
+walk(cat_plot_list_no_outliers, print)
+```
+
+### Variable correlations and multicolineality:
+
+```{r}
+
+df_corr <- df_model %>%
+  mutate(
+    log_total_students_enrolled = log1p(total_students_enrolled),
+    log_estimated_staff = log1p(estimated_staff),
+    log_total_international_students = log1p(total_international_students),
+    log_total_citations = log1p(total_citations),
+    log_citations_per_faculty = log1p(citations_per_faculty),
+    log_total_publications = log1p(total_publications),
+    log_h_index = log1p(h_index),
+    log_research_productivity = log1p(research_productivity),
+    log_international_co_authorship = log1p(international_co_authorship)
+  )
+
+cor_vars <- c(
+  "log_total_students_enrolled",
+  "student_to_staff_ratio",
+  "log_estimated_staff",
+  "international_students_fraction",
+  "log_total_international_students",
+  "female_students_fraction",
+  "log_total_citations",
+  "log_citations_per_faculty",
+  "log_total_publications",
+  "log_h_index",
+  "x2_year_mean_citations_per_publication",
+  "x5_year_publication_growth_percent",
+  "x5_year_citation_growth_percent",
+  "log_research_productivity",
+  "log_international_co_authorship",
+  "alumni_impact_index_0_1000"
+)
+
+# Importante: dejo fuera carbon_neutrality_net_zero_target_0_1 porque es ordinal/binaria. La analizamos después con ranking mediante comparación de medias o Wilcoxon.
+
+cor_matrix <- df_corr %>%
+  dplyr::select(all_of(cor_vars)) %>%
+  cor(use = "pairwise.complete.obs", method = "spearman")
+
+short_names <- c(
+  "Students",
+  "Staff ratio",
+  "Staff",
+  "Intl frac.",
+  "Intl students",
+  "Citations",
+  "Cit./faculty",
+  "Publications",
+  "H-index",
+  "2Y cit./pub.",
+  "5Y pub. growth",
+  "5Y cit. growth",
+  "Research prod.",
+  "Intl co-auth.",
+  "Alumni impact"
+)
+
+# If female_students_fraction is included, use this version:
+short_names <- c(
+  "Students",
+  "Staff ratio",
+  "Staff",
+  "Intl frac.",
+  "Intl students",
+  "Female frac.",
+  "Citations",
+  "Cit./faculty",
+  "Publications",
+  "H-index",
+  "2Y cit./pub.",
+  "5Y pub. growth",
+  "5Y cit. growth",
+  "Research prod.",
+  "Intl co-auth.",
+  "Alumni impact"
+)
+
+colnames(cor_matrix) <- short_names
+rownames(cor_matrix) <- short_names
+
+corrplot(
+  cor_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  tl.cex = 0.75,
+  tl.col = "black",
+  number.cex = 0.5
+)
+
+high_corr_pairs <- as.data.frame(as.table(cor_matrix)) %>%
+  rename(
+    var1 = Var1,
+    var2 = Var2,
+    correlation = Freq
+  ) %>%
+  filter(var1 != var2) %>%
+  mutate(abs_corr = abs(correlation)) %>%
+  arrange(desc(abs_corr)) %>%
+  distinct(
+    pmin(as.character(var1), as.character(var2)),
+    pmax(as.character(var1), as.character(var2)),
+    .keep_all = TRUE
+  ) %>%
+  filter(abs_corr >= 0.70)
+
+high_corr_pairs %>%
+  gt()
+
+ranking_corr_tests <- map_dfr(
+  cor_vars,
+  \(v) {
+    test <- cor.test(
+      df_corr[[v]],
+      df_corr$world_ranking_the,
+      method = "spearman",
+      exact = FALSE
+    )
+    
+    tibble(
+      variable = v,
+      variable_label = get_var_label(v),
+      correlation = unname(test$estimate),
+      p_value = test$p.value
+    )
+  }
+) %>%
+  mutate(
+    abs_corr = abs(correlation),
+    significant = p_value < 0.05,
+    interpretation = case_when(
+      correlation < 0 ~ "Higher values associated with better ranking",
+      correlation > 0 ~ "Higher values associated with worse ranking",
+      TRUE ~ "No monotonic association"
+    )
+  ) %>%
+  arrange(desc(abs_corr))
+
+ranking_corr_tests %>%
+  gt()
+
+ggplot(
+  ranking_corr_tests,
+  aes(
+    x = reorder(variable_label, abs_corr),
+    y = correlation,
+    fill = significant
+  )
+) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("TRUE" = "#0072B2", "FALSE" = "grey70"),
+    labels = c("Not significant", "Significant")
+  ) +
+  labs(
+    title = "Correlation of numerical variables with THE ranking position",
+    subtitle = "Negative correlations indicate association with better ranking positions",
+    x = NULL,
+    y = "Spearman correlation",
+    fill = "Statistical significance"
+  ) +
+  theme_minimal()
+
+df_corr %>%
+  group_by(carbon_neutrality_net_zero_target_0_1) %>%
+  summarise(
+    n = n(),
+    mean_ranking = mean(world_ranking_the, na.rm = TRUE),
+    median_ranking = median(world_ranking_the, na.rm = TRUE),
+    sd_ranking = sd(world_ranking_the, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  gt()
+
+ggplot(
+  df_corr,
+  aes(
+    x = carbon_neutrality_net_zero_target_0_1,
+    y = world_ranking_the,
+    fill = carbon_neutrality_net_zero_target_0_1
+  )
+) +
+  geom_boxplot(alpha = 0.7) +
+  scale_y_reverse() +
+  labs(
+    title = "THE ranking position by net-zero target status",
+    subtitle = "Lower values indicate better ranking positions",
+    x = "Carbon neutrality / Net-zero target",
+    y = "THE ranking position"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Modeling
+
+```{r}
+
+model_data <- df_corr %>%
+  dplyr::select(
+    world_ranking_the,
+    
+    # size / institutional structure
+    student_to_staff_ratio,
+    
+    # internationalisation
+    international_students_fraction,
+    female_students_fraction,
+    
+    # research output / impact
+    log_total_publications,
+    log_h_index,
+    x2_year_mean_citations_per_publication,
+    x5_year_publication_growth_percent,
+    x5_year_citation_growth_percent,
+    log_research_productivity,
+    log_international_co_authorship,
+    
+    # broader institutional proxies
+    alumni_impact_index_0_1000,
+    carbon_neutrality_net_zero_target_0_1
+  ) %>%
+  drop_na()
+
+glimpse(model_data)
+dim(model_data)
+
+lm_full <- lm(
+  world_ranking_the ~ .,
+  data = model_data
+)
+
+summary(lm_full)
+```
+
+```{r}
+
+set.seed(123)
+
+split_holdout <- initial_split(model_data, prop = 0.8)
+
+data_train <- training(split_holdout)
+data_test  <- testing(split_holdout)
+
+set.seed(123)
+
+folds_tbl <- vfold_cv(data_train, v = 10)
+
+m1_main <- lm(
+  world_ranking_the ~ .,
+  data = data_train
+)
+
+summary(m1_main)
+
+tidy(m1_main) %>%
+  arrange(p.value) %>%
+  gt()
+
+glance(m1_main) %>%
+  gt()
+
+full_model <- lm(
+  world_ranking_the ~ .,
+  data = data_train
+)
+
+best_model_aic <- stepAIC(
+  full_model,
+  direction = "both",
+  trace = FALSE
+)
+
+formula(best_model_aic)
+
+summary(best_model_aic)
+
+tidy(best_model_aic) %>%
+  arrange(p.value) %>%
+  gt()
+
+glance(best_model_aic) %>%
+  gt()
+
+n_train <- nrow(data_train)
+
+best_model_bic <- stepAIC(
+  full_model,
+  direction = "both",
+  k = log(n_train),
+  trace = FALSE
+)
+
+formula(best_model_bic)
+
+summary(best_model_bic)
+
+tidy(best_model_bic) %>%
+  arrange(p.value) %>%
+  gt()
+
+glance(best_model_bic) %>%
+  gt()
+
+gam_formula <- world_ranking_the ~
+  s(log_h_index) +
+  s(log_total_publications) +
+  s(log_research_productivity) +
+  s(student_to_staff_ratio) +
+  s(international_students_fraction) +
+  female_students_fraction +
+  x2_year_mean_citations_per_publication +
+  x5_year_publication_growth_percent +
+  x5_year_citation_growth_percent +
+  log_international_co_authorship +
+  alumni_impact_index_0_1000 +
+  carbon_neutrality_net_zero_target_0_1
+
+gam_fit <- gam(
+  formula = gam_formula,
+  data = data_train,
+  method = "REML",
+  select = TRUE
+)
+
+summary(gam_fit)
+
+compute_reg_metrics <- function(model_fit, data_eval) {
+  
+  preds <- predict(model_fit, newdata = data_eval)
+  
+  tibble(
+    rmse = sqrt(mean((data_eval$world_ranking_the - preds)^2, na.rm = TRUE)),
+    mae = mean(abs(data_eval$world_ranking_the - preds), na.rm = TRUE),
+    r_squared = cor(
+      data_eval$world_ranking_the,
+      preds,
+      use = "complete.obs"
+    )^2
+  )
+}
+
+model_tbl <- tibble(
+  model = c(
+    "M1_main",
+    "StepAIC",
+    "StepBIC",
+    "GAM"
+  ),
+  fit = list(
+    m1_main,
+    best_model_aic,
+    best_model_bic,
+    gam_fit
+  )
+)
+
+holdout_tbl <- model_tbl %>%
+  mutate(
+    train = map(fit, ~ compute_reg_metrics(.x, data_train)),
+    test = map(fit, ~ compute_reg_metrics(.x, data_test))
+  ) %>%
+  dplyr::select(model, train, test) %>%
+  unnest_wider(train, names_sep = "_") %>%
+  unnest_wider(test, names_sep = "_") %>%
+  arrange(test_rmse)
+
+holdout_tbl %>%
+  gt()
+
+form_m1 <- formula(m1_main)
+form_step <- formula(best_model_aic)
+form_bic <- formula(best_model_bic)
+
+model_formula_tbl <- tibble(
+  model = c("M1_main", "StepAIC", "StepBIC"),
+  formula = list(form_m1, form_step, form_bic)
+)
+
+cv_one_fold_lm <- function(split_obj, formula) {
+  
+  data_fold_train <- analysis(split_obj)
+  data_fold_test <- assessment(split_obj)
+  
+  fit <- lm(formula = formula, data = data_fold_train)
+  
+  compute_reg_metrics(fit, data_fold_test)
+}
+
+cv_grid_tbl <- crossing(
+  model_formula_tbl,
+  folds_tbl
+)
+
+cv_long_tbl <- cv_grid_tbl %>%
+  mutate(
+    metrics = map2(splits, formula, cv_one_fold_lm)
+  ) %>%
+  dplyr::select(model, id, metrics) %>%
+  unnest(metrics)
+
+cv_summary_tbl <- cv_long_tbl %>%
+  group_by(model) %>%
+  summarise(
+    rmse_mean = mean(rmse),
+    rmse_sd = sd(rmse),
+    mae_mean = mean(mae),
+    mae_sd = sd(mae),
+    r_squared_mean = mean(r_squared),
+    r_squared_sd = sd(r_squared),
+    .groups = "drop"
+  ) %>%
+  arrange(rmse_mean)
+
+cv_summary_tbl %>%
+  gt()
+
+cv_one_fold_gam <- function(split_obj, formula) {
+  
+  data_fold_train <- analysis(split_obj)
+  data_fold_test <- assessment(split_obj)
+  
+  fit <- gam(
+    formula = formula,
+    data = data_fold_train,
+    method = "REML",
+    select = TRUE
+  )
+  
+  compute_reg_metrics(fit, data_fold_test)
+}
+
+gam_cv_tbl <- folds_tbl %>%
+  mutate(
+    metrics = map(splits, ~ cv_one_fold_gam(.x, gam_formula))
+  ) %>%
+  dplyr::select(id, metrics) %>%
+  unnest(metrics) %>%
+  mutate(model = "GAM")
+
+gam_cv_summary <- gam_cv_tbl %>%
+  summarise(
+    rmse_mean = mean(rmse),
+    rmse_sd = sd(rmse),
+    mae_mean = mean(mae),
+    mae_sd = sd(mae),
+    r_squared_mean = mean(r_squared),
+    r_squared_sd = sd(r_squared)
+  ) %>%
+  mutate(model = "GAM") %>%
+  dplyr::select(model, everything())
+
+gam_cv_summary %>%
+  gt()
+
+cv_compare_tbl <- bind_rows(
+  cv_summary_tbl,
+  gam_cv_summary
+) %>%
+  arrange(rmse_mean)
+
+cv_compare_tbl %>%
+  gt()
+
+cv_compare_long <- bind_rows(
+  cv_long_tbl,
+  gam_cv_tbl
+)
+
+ggplot(cv_compare_long, aes(x = model, y = rmse, fill = model)) +
+  geom_boxplot(alpha = 0.8, outlier.color = "#D55E00") +
+  labs(
+    title = "Cross-validation RMSE by model",
+    x = NULL,
+    y = "RMSE"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+The linear models provide a solid first benchmark, explaining around 78% of the variation in THE ranking position. However, the StepAIC and StepBIC specifications offer almost no improvement over the full linear model, suggesting that automatic variable selection does not substantially improve predictive performance in this setting.
+
+**The GAM performs clearly better than the linear alternatives. It achieves the lowest cross-validated RMSE and MAE, as well as the highest cross-validated R². The same pattern is observed in the holdout test set, where the GAM reduces prediction error and increases explanatory power.**
+
+These results suggest that the relationship between university ranking position and institutional performance indicators is not purely linear. Allowing for smooth non-linear effects, especially in research-related and institutional-size variables, improves predictive accuracy while maintaining a relatively interpretable modelling framework.
+
+### RANDOM FOREST AND NEURONAL NETWORK
+
+```{r}
+
+set.seed(123)
+
+data_train_rf <- data_train
+data_test_rf  <- data_test
+
+cl <- makePSOCKcluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+
+set.seed(123)
+
+trControl_rf <- trainControl(
+  method = "cv",
+  number = 10,
+  savePredictions = "final",
+  allowParallel = TRUE
+)
+
+tuneGrid_rf <- expand.grid(
+  mtry = c(3, 5, 7, 9, 11),
+  splitrule = "variance",
+  min.node.size = c(5, 10, 20)
+)
+
+rf_fit <- caret::train(
+  world_ranking_the ~ .,
+  data = data_train_rf,
+  method = "ranger",
+  metric = "RMSE",
+  trControl = trControl_rf,
+  tuneGrid = tuneGrid_rf,
+  num.trees = 500,
+  importance = "impurity"
+)
+
+stopCluster(cl)
+registerDoSEQ()
+
+rf_fit
+plot(rf_fit)
+
+rf_test_pred <- predict(rf_fit, newdata = data_test_rf)
+
+rf_holdout_metrics <- tibble(
+  model = "RandomForest",
+  test_rmse = sqrt(mean((data_test_rf$world_ranking_the - rf_test_pred)^2)),
+  test_mae = mean(abs(data_test_rf$world_ranking_the - rf_test_pred)),
+  test_r_squared = cor(data_test_rf$world_ranking_the, rf_test_pred)^2
+)
+
+rf_holdout_metrics %>%
+  gt()
+
+rf_importance <- varImp(rf_fit)
+
+rf_importance
+plot(rf_importance, top = 15)
+```
+
+```{r}
+
+data_train_nn <- data_train
+data_test_nn  <- data_test
+
+dummy_obj <- dummyVars(
+  world_ranking_the ~ .,
+  data = data_train_nn
+)
+
+x_train_nn <- predict(dummy_obj, newdata = data_train_nn) %>%
+  as.data.frame()
+
+x_test_nn <- predict(dummy_obj, newdata = data_test_nn) %>%
+  as.data.frame()
+
+pp_obj <- preProcess(
+  x_train_nn,
+  method = c("center", "scale")
+)
+
+x_train_nn_scaled <- predict(pp_obj, x_train_nn)
+x_test_nn_scaled  <- predict(pp_obj, x_test_nn)
+
+train_nn_final <- bind_cols(
+  world_ranking_the = data_train_nn$world_ranking_the,
+  x_train_nn_scaled
+)
+
+test_nn_final <- bind_cols(
+  world_ranking_the = data_test_nn$world_ranking_the,
+  x_test_nn_scaled
+)
+
+cl <- makePSOCKcluster(parallel::detectCores() - 1)
+registerDoParallel(cl)
+
+set.seed(123)
+
+trControl_nn <- trainControl(
+  method = "cv",
+  number = 10,
+  savePredictions = "final",
+  allowParallel = TRUE
+)
+
+tuneGrid_nn <- expand.grid(
+  size = c(3, 5, 7, 9),
+  decay = c(0.0001, 0.001, 0.01, 0.1)
+)
+
+nn_fit <- caret::train(
+  world_ranking_the ~ .,
+  data = train_nn_final,
+  method = "nnet",
+  metric = "RMSE",
+  trControl = trControl_nn,
+  tuneGrid = tuneGrid_nn,
+  trace = FALSE,
+  linout = TRUE,
+  maxit = 500,
+  MaxNWts = 20000
+)
+
+stopCluster(cl)
+registerDoSEQ()
+
+nn_fit
+plot(nn_fit)
+
+nn_test_pred <- predict(nn_fit, newdata = test_nn_final)
+
+nn_holdout_metrics <- tibble(
+  model = "NeuralNet",
+  test_rmse = sqrt(mean((test_nn_final$world_ranking_the - nn_test_pred)^2)),
+  test_mae = mean(abs(test_nn_final$world_ranking_the - nn_test_pred)),
+  test_r_squared = cor(test_nn_final$world_ranking_the, nn_test_pred)^2
+)
+
+nn_holdout_metrics %>%
+  gt()
+
+linear_gam_test_tbl <- holdout_tbl %>%
+  transmute(
+    model,
+    test_rmse,
+    test_mae,
+    test_r_squared
+  )
+
+final_test_compare_tbl <- bind_rows(
+  linear_gam_test_tbl,
+  rf_holdout_metrics,
+  nn_holdout_metrics
+) %>%
+  arrange(test_rmse)
+
+final_test_compare_tbl %>%
+  gt()
+
+rf_cv_summary <- rf_fit$results %>%
+  filter(
+    mtry == rf_fit$bestTune$mtry,
+    min.node.size == rf_fit$bestTune$min.node.size
+  ) %>%
+  transmute(
+    model = "RandomForest",
+    rmse_mean = RMSE,
+    rmse_sd = RMSESD,
+    mae_mean = MAE,
+    mae_sd = MAESD,
+    r_squared_mean = Rsquared,
+    r_squared_sd = RsquaredSD
+  )
+
+nn_cv_summary <- nn_fit$results %>%
+  filter(
+    size == nn_fit$bestTune$size,
+    decay == nn_fit$bestTune$decay
+  ) %>%
+  transmute(
+    model = "NeuralNet",
+    rmse_mean = RMSE,
+    rmse_sd = RMSESD,
+    mae_mean = MAE,
+    mae_sd = MAESD,
+    r_squared_mean = Rsquared,
+    r_squared_sd = RsquaredSD
+  )
+
+final_cv_compare_tbl <- bind_rows(
+  cv_compare_tbl,
+  rf_cv_summary,
+  nn_cv_summary
+) %>%
+  arrange(rmse_mean)
+
+final_cv_compare_tbl %>%
+  gt()
+
+ggplot(final_test_compare_tbl, aes(x = reorder(model, test_rmse), y = test_rmse, fill = model)) +
+  geom_col(alpha = 0.8) +
+  coord_flip() +
+  labs(
+    title = "Test RMSE by model",
+    x = NULL,
+    y = "Test RMSE"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Conclusions
+
+The proxy-only models show that institutional and research-related variables explain a substantial part of the variation in THE ranking positions.
+
+The Random Forest model provides the strongest predictive performance, suggesting that the relationship between university proxies and ranking outcomes is complex, non-linear and likely driven by interactions between research output, research impact, internationalisation and institutional prestige proxies.
+
+The GAM also performs strongly, indicating that non-linear effects are important while preserving a higher degree of interpretability. Linear models provide a useful baseline but are clearly outperformed by non-linear approaches, while the Neural Network does not add predictive value beyond Random Forest or GAM.
+
+1.  **Random Forest: best for prediction accuracy.**
+
+2.  **GAM: best for interpreting non-linear relationships.**
+
+3.  **Neural Network: better than linear models, but worse than Random Forest.**
+
+4.  **Linear models: useful as benchmarks and for interpretability, but outperformed by the other models.**
